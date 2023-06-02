@@ -1921,7 +1921,13 @@ class Trainer:
                 rng_to_sync = True
 
             step = -1
+            avg_fwbw = 0.0
+            avg_optm = 0.0
+            avg_total = 0.0
+            avg = 0.0
+
             for step, inputs in enumerate(epoch_iterator):
+                iteration_start = time.time()
                 total_batched_samples += 1
                 if rng_to_sync:
                     self._load_rng_state(resume_from_checkpoint)
@@ -1941,7 +1947,8 @@ class Trainer:
 
                 if step % args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
-
+                
+                start = time.time()
                 with self.accelerator.accumulate(model):
                     tr_loss_step = self.training_step(model, inputs)
 
@@ -1956,7 +1963,13 @@ class Trainer:
                     tr_loss += tr_loss_step
 
                 self.current_flos += float(self.floating_point_ops(inputs))
-
+                step_time = (time.time() - start) * 1000
+                #logger.info(f"FWBW {step}: {step_time:.5f} ms")
+                avg_fwbw += step_time
+                if step >= steps_in_epoch // 2:
+                    avg += step_time
+                
+                start = time.time()
                 # should this be under the accumulate context manager?
                 # the `or` condition of `steps_in_epoch <= args.gradient_accumulation_steps` is not covered
                 # in accelerate
@@ -2027,9 +2040,22 @@ class Trainer:
                     self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
                 else:
                     self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
+                step_time = (time.time() - start) * 1000
+                #logger.info(f"optimizer {step}: {step_time:.5f} ms")
+                avg_optm += step_time
+
+                step_time = (time.time() - iteration_start) * 1000
+                #logger.info(f"iteration {step}: {step_time:.5f} ms")
+                avg_total += step_time
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
+                
+            logger.info(f"Avg of 2nd half: {(avg / (steps_in_epoch - steps_in_epoch // 2)):.5f} ms")
+            logger.info(f"Avg of FWBW: {(avg_fwbw / steps_in_epoch):.5f} ms")
+            logger.info(f"Avg of optimizer: {(avg_optm / steps_in_epoch):.5f} ms")
+            logger.info(f"Avg of iteration: {(avg_total / steps_in_epoch):.5f} ms")
+
             if step < 0:
                 logger.warning(
                     "There seems to be not a single sample in your epoch_iterator, stopping training at step"
